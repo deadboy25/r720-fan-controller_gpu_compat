@@ -4,14 +4,14 @@ import yaml
 import getopt
 import os
 import re
-import sensors  # https://github.com/bastienleonard/pysensors.git
+import sensors # https://github.com/bastienleonard/pysensors.git
 import subprocess
 import sys
 import time
 import signal
 
 config = {
-    'config_paths': ['fan_control.yaml', '/opt/fan_control/fan_control.yaml'],
+    'config_path': '/opt/fan_control/fan_control.yaml',
     'general': {
         'debug': False,
         'interval': 60
@@ -20,10 +20,8 @@ config = {
 }
 state = {}
 
-
 class ConfigError(Exception):
     pass
-
 
 def ipmitool(args, host):
     global state
@@ -36,7 +34,7 @@ def ipmitool(args, host):
         cmd += ['-P', host['remote_ipmi_credentials']['password']]
     cmd += (args.split(' '))
     if config['general']['debug']:
-        print(re.sub(r'-([UP]) (\S+)', r'-\1 ___', ' '.join(cmd)))  # Do not log IPMI credentials
+        print(re.sub(r'-([UP]) (\S+)', r'-\1 ___', ' '.join(cmd))) # Do not log IPMI credentials
         return True
 
     try:
@@ -48,7 +46,6 @@ def ipmitool(args, host):
         print("\"{}\" command has timed out".format(cmd), file=sys.stderr)
         return False
     return True
-
 
 def set_fan_control(wanted_mode, host):
     global state
@@ -66,11 +63,16 @@ def set_fan_control(wanted_mode, host):
 
         state[host['name']]['fan_control_mode'] = wanted_mode
 
-
 def set_fan_speed(threshold_n, host):
     global state
 
-    wanted_percentage = host['speeds'][threshold_n]
+    ### Code added by Eddie ###
+    if threshold_n == 3:
+        wanted_percentage = 100
+    else:
+        wanted_percentage = host['speeds'][threshold_n]
+    # End code added by Eddie #
+#    wanted_percentage = host['speeds'][threshold_n]    # Removed by Eddie to allow insertion of code above
     if wanted_percentage == state[host['name']]['fan_speed']:
         return
 
@@ -84,26 +86,21 @@ def set_fan_speed(threshold_n, host):
         ipmitool("raw 0x30 0x30 0x02 0xff {}".format(wanted_percentage_hex), host)
         state[host['name']]['fan_speed'] = wanted_percentage
 
-
 def parse_config():
     global config
     _debug = config['general']['debug']
     _interval = config['general']['interval']
 
-    config_path = None
-    for path in config['config_paths']:
-        if os.path.isfile(path):
-            config_path = path
-    if not config_path:
+    if not os.path.isfile(config['config_path']):
         raise RuntimeError("Missing or unspecified configuration file.")
     else:
         print("Loading configuration file.")
         _config = None
         try:
-            with open(config_path, 'r') as yaml_conf:
+            with open(config['config_path'], 'r') as yaml_conf:
                 _config = yaml.safe_load(yaml_conf)
         except yaml.YAMLError as err:
-            raise err  # TODO: pretty print
+            raise err # TODO: pretty print
         config = _config
         if 'debug' not in list(config['general'].keys()):
             config['general']['debug'] = _debug
@@ -117,13 +114,13 @@ def parse_config():
                 raise ConfigError('Host "{}" has {} temperature thresholds instead of 3.'.format(host['name'], len(host['temperatures'])))
             if len(host['speeds']) != 3:
                 raise ConfigError('Host "{}" has {} fan speeds instead of 3.'.format(host['name'], len(host['speeds'])))
-            if ('remote_temperature_command' in list(host.keys()) or 'remote_ipmi_credentials' in list(host.keys())) and \
-                    ('remote_temperature_command' not in list(host.keys()) or 'remote_ipmi_credentials' not in list(host.keys())):
+            if ('remote_temperature_command' in list(host.keys()) or 'remote_ipmi_credentials' in list(host.keys()))  and \
+                ('remote_temperature_command' not in list(host.keys()) or 'remote_ipmi_credentials' not in list(host.keys())):
                 raise ConfigError('Host "{}" must specify either none or both "remote_temperature_command" and "remote_ipmi_credentials" keys.'.format(host['name']))
             if 'remote_ipmi_credentials' in list(host.keys()) and \
-                ('host' not in list(host['remote_ipmi_credentials'].keys()) or
-                    'username' not in list(host['remote_ipmi_credentials'].keys()) or
-                    'password' not in list(host['remote_ipmi_credentials'].keys())):
+                ('host' not in list(host['remote_ipmi_credentials'].keys()) or \
+                'username' not in list(host['remote_ipmi_credentials'].keys()) or \
+                'password' not in list(host['remote_ipmi_credentials'].keys())):
                 raise ConfigError('Host "{}" must specify either none or all "host", "username" and "password" values for the "remote_ipmi_credentials" key.'.format(host['name']))
             # TODO: check presence/validity of values instead of keys presence only
 
@@ -135,16 +132,15 @@ def parse_config():
                 'fan_speed': 0
             }
 
-
 def parse_opts():
     global config
     help_str = "fan_control.py [-d] [-c <path_to_config>] [-i <interval>]"
 
     try:
-        opts, _ = getopt.getopt(sys.argv[1:], "hdc:i:", ["help", "debug", "config=", "interval="])
+        opts, _ = getopt.getopt(sys.argv[1:],"hdc:i:",["help","debug","config=","interval="])
     except getopt.GetoptError as e:
-        print("Unrecognized option. Usage:\n{}".format(help_str))
-        raise getopt.GetoptError(e)
+      print("Unrecognized option. Usage:\n{}".format(help_str))
+      raise getopt.GetoptError(e)
 
     for opt, arg in opts:
         if opt in ('-h', '--help'):
@@ -153,27 +149,23 @@ def parse_opts():
         elif opt in ('-d', '--debug'):
             config['general']['debug'] = True
         elif opt in ('-c', '--config'):
-            config['config_paths'] = [arg]
+            config['config_path'] = arg
         elif opt in ('-i', '--interval'):
             config['general']['interval'] = arg
-
 
 def checkHysteresis(temperature, threshold_n, host):
     global state
 
-    # Skip checks if hysteresis is disabled for this host
-    if not host['hysteresis']:
-        return True
-
-    # Fan speed is higher than it should be or automatic mode is currently enabled
-    if (state[host['name']]['fan_speed'] > host['speeds'][threshold_n] or
-            state[host['name']]['fan_control_mode'] == 'automatic'):
-        # T ≤ (threshold - hysteresis)
-        return temperature <= host['temperatures'][threshold_n] - host['hysteresis']
-
-    # Fan speed is lower than it should be, step up immediately and ignore hysteresis
-    return True
-
+    return (
+        not host['hysteresis'] or
+        (
+            host['hysteresis'] and (
+                state[host['name']]['fan_speed'] > host['speeds'][threshold_n] or
+                state[host['name']]['fan_control_mode'] == 'automatic'
+            ) and
+            temperature <= host['temperatures'][threshold_n] - host['hysteresis']
+        )
+    )
 
 def compute_fan_speed(temp_average, host):
     global state
@@ -186,6 +178,7 @@ def compute_fan_speed(temp_average, host):
         temp_average <= host['temperatures'][0] and
         checkHysteresis(temp_average, 0, host)
     ):
+        print("temp below threshold0")
         set_fan_speed(0, host)
 
     # Threshold0 < Tavg ≤ Threshold1
@@ -193,6 +186,7 @@ def compute_fan_speed(temp_average, host):
         host['temperatures'][0] < temp_average <= host['temperatures'][1] and
         checkHysteresis(temp_average, 1, host)
     ):
+        print("temp between threshold0 and threshold1")
         set_fan_speed(1, host)
 
     # Threshold1 < Tavg ≤ Threshold2
@@ -200,12 +194,16 @@ def compute_fan_speed(temp_average, host):
         host['temperatures'][1] < temp_average <= host['temperatures'][2] and
         checkHysteresis(temp_average, 2, host)
     ):
+        print("temp between threshold1 and threshold2")
         set_fan_speed(2, host)
 
     # Tavg > Threshold2
     elif host['temperatures'][2] < temp_average:
-        set_fan_control("automatic", host)
-
+        print("temp above threshold2")
+        ### Code added by Eddie ###
+        set_fan_speed(3, host)
+        # End code added by Eddie #
+#        set_fan_control("automatic", host)    # Code removed by Eddie to allow insertion of code above
 
 def main():
     global config
@@ -239,7 +237,19 @@ def main():
                 temps = list(map(lambda n: float(n), cmd.read().strip().split('\n')))
                 cmd.close()
 
-            temp_average = round(sum(temps)/len(temps))
+#            temp_average = round(sum(temps)/len(temps))
+            cpu_average = round(sum(temps)/len(temps))
+
+            # code added by eddie
+            gpu_temps =  [int(t) for t in str(subprocess.getoutput("nvidia-smi -q | grep 'GPU Current Temp' | cut -d ' ' -f 30")).split('\n')]
+#            print("gpu_temps" + str(gpu_temps))
+            max_gpu_temp = max(gpu_temps)
+            print("max gpu temp " + str(max_gpu_temp))
+            temp_average = max(cpu_average, max_gpu_temp)
+            print("temp average " + str(temp_average))
+            print("cpu average " + str(cpu_average))
+            # end code added by eddie
+
             compute_fan_speed(temp_average, host)
 
         time.sleep(config['general']['interval'])
